@@ -11,6 +11,7 @@ Deploy: Streamlit Community Cloud (see README.md)
 
 import asyncio
 import io
+import json
 import re
 import subprocess
 import sys
@@ -200,6 +201,40 @@ async def render_urls(urls: list, progress_cb=None) -> dict:
 # Diagnostics and scoring
 # ---------------------------------------------------------------
 
+def extract_jsonld_types(jsonld_scripts) -> str:
+    """Collects every @type declared in the JSON-LD blocks (including nested
+    entities and @graph structures). Returns e.g. 'Product (1), Question (5)'."""
+    types = Counter()
+
+    def walk(node):
+        if isinstance(node, dict):
+            t = node.get("@type")
+            if isinstance(t, str):
+                types[t] += 1
+            elif isinstance(t, list):
+                for x in t:
+                    if isinstance(x, str):
+                        types[x] += 1
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for script in jsonld_scripts:
+        content = (script.string or script.get_text() or "").strip()
+        if not content:
+            continue
+        try:
+            walk(json.loads(content))
+        except (json.JSONDecodeError, ValueError):
+            continue  # malformed JSON-LD block — counted but untyped
+
+    if not types:
+        return ""
+    return ", ".join(f"{t} ({n})" for t, n in types.most_common())[:500]
+
+
 def diagnostics(raw_html: str) -> dict:
     soup = BeautifulSoup(raw_html or "", "lxml")
     meta = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})
@@ -208,6 +243,7 @@ def diagnostics(raw_html: str) -> dict:
     return {
         "noindex": "noindex" in meta_content or "none" in meta_content,
         "jsonld_count": len(jsonld),
+        "jsonld_types": extract_jsonld_types(jsonld),
     }
 
 
@@ -384,6 +420,8 @@ def run_audit(urls: list, status_box, progress_bar) -> tuple:
             "User-Agent blocking": "⚠️ Yes" if raw["ua_blocked"] else "No",
             "Noindex": "Yes" if diag["noindex"] else "No",
             "JSON-LD in raw HTML": diag["jsonld_count"],
+            "JSON-LD types": diag["jsonld_types"] or ("None" if diag["jsonld_count"] == 0
+                                                      else "⚠️ Present but unparseable"),
             "H1 status": heads["h1_status"],
             "Heading hierarchy": "✅ OK" if heads["hierarchy_ok"]
                                  else f"⚠️ {len(heads['breaks_rendered']) or len(heads['breaks_raw'])} break(s)",
